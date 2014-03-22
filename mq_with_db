@@ -1,0 +1,236 @@
+#include <iostream>
+#include <thread>
+#include <leveldb.h>
+#include <string>
+#include <zmq.hpp>
+#include <leveldb/db.h>
+using namespace std;
+
+
+leveldb::DB * db;
+
+
+
+typedef enum {
+	ERROR_Type = 0 ,
+	GET_Type ,
+	PUT_Type ,
+	MGET_Type ,
+}OperationType;
+
+
+typedef struct Operation
+{
+   OperationType type_;
+   bool status_;
+   string key_;
+   string value_;
+};
+
+bool created_db(const string & folder){
+	 if (folder.empty())
+	 {
+		 return false;
+	 } 
+	 else
+	 {
+		 leveldb::Options options;
+		 options.create_if_missing = true;
+		 
+		 leveldb::Status status =   leveldb::DB::Open(options,folder,&db);
+		 
+		 
+		 if (status.ok())
+		 {
+			 std::cerr<<" Unable to create database ,"<<  status.ToString()<<endl;
+			 return false;
+		 }
+	 }
+	 return true;
+}
+
+
+bool put(const string & key ,string & value){
+	leveldb::Status s = db->Put(leveldb::WriteOptions(),key,value);
+
+	if (!s.ok())
+	{
+		cerr<<s.ToString()<<endl;
+
+	}
+
+	return s.ok();
+
+}
+
+bool get(const string& key ,string & value){
+	leveldb::Status s = db->Get(leveldb::ReadOptions(),key,&value);
+
+	if (!s.ok())
+	{
+		cerr<<s.ToString()<<endl;
+		return false;
+	}
+	return s.ok();
+}
+
+
+bool multi_get(const string &key ,string &value){
+	   leveldb::Iterator * it = db->NewIterator(leveldb::ReadOptions());
+
+	   it->Seek(key);
+
+	   if (!it->Valid())
+	   {
+		   delete it;
+		   return false;
+	   }
+
+	   while (it->Valid() && it->key().ToString() == key)
+	   {
+		   value = it->value().ToString()+" : ";
+		   it->Next();
+	   }
+
+	   delete it;
+	   return true;
+}
+
+
+bool do_operation_on_db( Operation & new_op){
+	 
+	 if (new_op.type_ == PUT_Type)
+	 {
+		 new_op.status_ = put(new_op.key_,new_op.value_);
+		 return new_op.status_;
+	 }else if(new_op.type_ == GET_Type){
+		 new_op.status_ = get(new_op.key_,new_op.value_);
+		 return new_op.status_;
+	 }else if(new_op.type_ == MGET_Type){
+		 new_op.status_ = multi_get(new_op.key_,new_op.value_);
+		 return new_op.status_;
+	 }else{
+		 cerr<<"error command should not send to here!";
+		 return false;
+	 }
+	 return false;
+}
+/*
+void worker_rountine(void * arg){
+	 zmq::context_t * context = (zmq::context_t * )arg;
+
+	 zmq::socket_t socket(*context,ZMQ_REP);
+
+	 socket.connect("inproc://request");
+	 zmq::message_t req_message ,rep_message;
+	 Operation come_op;
+	 come_op.status_ = false;
+	 come_op.type_ = GET_Type;
+	 while (true)
+	 {
+		 socket.recv(&req_message);
+		 cout<<req_message.data()<<endl;
+		 memcpy((void * )rep_message.data(),"OK",3);
+		 socket.send(rep_message);
+	 }
+
+}
+
+void multi_thread(){
+    zmq::context_t context;
+	zmq::socket_t front_socket(context,ZMQ_ROUTER);
+	zmq::socket_t back_socket(context,ZMQ_ROUTER);
+	front_socket.bind("tcp://*:1234");
+	back_socket.bind("inproc://request");
+
+	zmq::pollitem_t items[2]={
+		{front_socket,0,ZMQ_POLLIN,0},
+		{back_socket,0,ZMQ_POLLIN,0}
+	} ;
+	for (int i =10;i<10;i++)
+	{
+		thread t1(worker_rountine,&context);
+		t1.join();
+	}
+	while (true)
+	{
+	   zmq::message_t msg;
+	   zmq::poll(&items[0],2,-1);
+	   unsigned int whats =0 ;
+
+	   if (items[0].revents && ZMQ_POLLIN)
+	   {
+		   while (true)
+		   {
+			   front_socket.recv(&msg);
+			   front_socket.getsockopt(ZMQ_RCVMORE,&whats,&whats);
+			   back_socket.send(msg,whats?ZMQ_SNDMORE:0);
+			   if (!whats)
+			   {
+				   break;
+			   }
+		   }
+	   } 
+	   else if(items[1].revents && ZMQ_POLLIN)
+	   {
+		   while (true)
+		   {
+			   back_socket.recv(&msg);
+			   back_socket.getsockopt(ZMQ_RCVMORE,&whats,&whats);
+			   front_socket.send(msg,whats?ZMQ_SNDMORE:0);
+			   if (!whats)
+			   {
+				   break;
+			   }
+		   }
+	   }
+
+	}
+
+
+
+
+
+
+} */
+
+void *worker_rourine(void * arg){
+	zmq::context_t * context = (zmq::context_t*)arg;
+	Operation come_operation;
+
+	zmq::socket_t socket(*context,ZMQ_REP);
+	socket.connect("inproc://workers");
+
+	while (true)
+	{
+	   zmq::message_t request ;
+	   socket.recv(&request);
+	   Sleep(10);
+	   zmq::message_t reply;
+	   memcpy((void*)reply.data(),"world",6);
+	   socket.send(reply);
+	}
+
+	return nullptr;
+}
+void multi_thread(const string url_path){
+
+	zmq::context_t context;
+	zmq::socket_t clients(context,ZMQ_ROUTER);
+
+	clients.bind("tcp://*:1234");
+	zmq::socket_t workers(context,ZMQ_DEALER);
+	workers.bind("inproc://workers");
+
+	for (int i = 0; i < 10; i++)
+	{
+		thread t1(worker_rourine,(void*)&context);
+		t1.join();
+	}
+	zmq::proxy(clients,workers,nullptr);
+}
+
+
+
+
+
